@@ -126,6 +126,23 @@ def show_stimulus_examples(data):
         ax.axis("off")
     return fig
 
+##############################################################################################################
+# simple matrix visualization. written by Andre
+
+def visualize_matrix(matrix, title="Population Activity", cmap="viridis", x_label="", y_label="", clabel= ""):
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # interpolation="none" prevents matplotlib from blurring discrete data points together.
+    im = ax.imshow(matrix, cmap=cmap, aspect="auto", interpolation="none")
+    
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(clabel)
+    
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    
+    return fig, ax
 
 
 
