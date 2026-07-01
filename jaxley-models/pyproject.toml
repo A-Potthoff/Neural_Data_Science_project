@@ -1,0 +1,41 @@
+[project]
+name = "jaxley-models"
+version = "0.1.0"
+description = "Jaxley-Models provides a library of common biophysical models implemented using [Jaxley](https://github.com/jaxleyverse/jaxley)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jaxley>=0.8.0",
+    "jaxley-mech>=0.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jaxley[dev]>=0.8.0",
+    "black",
+    "isort",
+    "pytest",
+    "pytest-cov",
+    # pyloric Cython reference simulator (used in test_pyloric.py)
+    "cython",
+    "setuptools",
+    "tqdm",
+    "pyloric @ git+https://github.com/mackelab/pyloric.git",
+]
+
+[tool.isort]
+profile = "black"
+
+[tool.uv]
+# Prefer excluding heavy transitive dependencies (sbi / torch / triton) that the
+# tests do not need.  We keep pyloric as a dev editable git dependency but tell
+# uv not to resolve the heavy optional deps so the lockfile remains lightweight.
+exclude-dependencies = ["sbi", "torch", "triton", "pyro-ppl"]
+
+# uv supports `override-dependencies` using simple PEP 508 requirement strings.
+# Provide an override by listing pyloric with a minimal extras-free requirement
+# that omits the heavy optional dependencies.  Using a string avoids TOML map
+# parsing issues.
+override-dependencies = [
+    'pyloric @ git+https://github.com/mackelab/pyloric.git#egg=pyloric; extra == "minimal"'
+]

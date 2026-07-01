@@ -1,0 +1,13 @@
+jaxley>=0.8.0
+jaxley-mech>=0.3.0
+
+[dev]
+jaxley[dev]>=0.8.0
+black
+isort
+pytest
+pytest-cov
+cython
+setuptools
+tqdm
+pyloric @ git+https://github.com/mackelab/pyloric.git
