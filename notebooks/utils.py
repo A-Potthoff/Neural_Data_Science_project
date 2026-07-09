@@ -176,7 +176,7 @@ def detect_spikes(
     centered_data = np.abs(v - median_v)
     rob_std = np.median(centered_data) / 0.6745
     
-    thrd = median_v + (5 * rob_std)
+    thrd = median_v + (5 * rob_std) # MAD estimator
 
     # Convert lockout time (ms) to samples
     refractory_period_samples = lockout_ms / dt
@@ -192,7 +192,7 @@ def detect_spikes(
     t = s * dt
 
     return t
-
+'''
 def detect_bursts(
     spike_times: np.ndarray,
     max_intra_burst_isi: float = 200.0,
@@ -208,7 +208,7 @@ def detect_bursts(
     Returns:
         List of arrays, each containing spike times belonging to one burst.
     """
-    if len(spike_times) == 0:
+    if len(spike_times) == 0: 
         return []
 
     bursts: List[List[float]] = [[spike_times[0]]]
@@ -220,6 +220,49 @@ def detect_bursts(
 
     bursts_filtered = [np.array(b) for b in bursts if len(b) >= min_spikes_per_burst]
     return bursts_filtered
+'''
+
+import numpy as np
+
+def detect_bursts(spike_times: np.ndarray, ISI_threshold: float = 200.0, min_spikes_per_burst: int = 1):
+    """Group spike times into bursts.
+    Args:
+        spike_times: Sorted spike times in ms.
+        ISI_threshold: Maximum ISI inside a burst (ms).
+        min_spikes_per_burst: Minimum number of spikes to count as a burst.
+    Returns:
+        List of arrays, each containing spike times belonging to one burst.
+    """
+    
+    # Catch empty arrays to avoid errors
+    if len(spike_times) == 0: 
+        return []
+
+    bursts = []
+    current_burst = [spike_times[0]] # Start the first burst with the very first spike
+
+    # Loop through the spikes, starting from the second one (index 1)
+    for i in range(1, len(spike_times)):
+        
+        # Calculate ISI (Inter-Spike Interval) using simple subtraction
+        current_ISI = spike_times[i] - spike_times[i-1]
+        
+        if current_ISI < ISI_threshold: 
+            # if the spike is right after another one, add it to the burst
+            current_burst.append(spike_times[i])
+        else: 
+            # It was too slow. Save the finished burst, and start a new one
+            bursts.append(current_burst) 
+            current_burst = [spike_times[i]]
+            
+    # Don't forget to append the very last burst when the loop finishes!
+    bursts.append(current_burst)
+    
+    # Filter out bursts that don't have enough spikes, and convert them to arrays
+    bursts_filtered = [np.array(b) for b in bursts if len(b) >= min_spikes_per_burst]
+    
+    return bursts_filtered
+
 
 
 def _burst_stats_single(
@@ -231,13 +274,13 @@ def _burst_stats_single(
 ) -> dict:
     """Compute burst statistics for a single neuron trace.
 
-    Returns dict with: period_ms, duty_cycle, onset_times, n_bursts.
+    Returns dict with: period_ms, duty_cycle, onset_times, n_bursts (no. oof spikes / burst).
     NaN for all stats if fewer than 2 bursts detected after burn-in.
     """
-    spike_times = detect_spikes(v, dt=dt) #threshold=threshold,
+    spike_times = detect_spikes(v, dt=dt) 
     # discard transient
     spike_times = spike_times[spike_times >= burn_in_ms]
-    bursts = detect_bursts(spike_times, max_intra_burst_isi=max_intra_burst_isi)
+    bursts = detect_bursts(spike_times, ISI_threshold=max_intra_burst_isi)
 
     if len(bursts) < 2:
         return {"period_ms": np.nan, "duty_cycle": np.nan, "onset_times": np.array([]), "n_bursts": len(bursts)}
@@ -248,9 +291,18 @@ def _burst_stats_single(
     ibis = np.diff(onset_times)
     period = float(np.mean(ibis))
     durations = offset_times - onset_times
-    duty_cycle = float(np.mean(durations) / period) if period > 0 else np.nan
+    duration = np.mean(durations)
+    duty_cycle = float(duration / period) if period > 0 else np.nan
 
-    return {"period_ms": period, "duty_cycle": duty_cycle, "onset_times": onset_times, "n_bursts": len(bursts)}
+    buffer_idx = int(10.0 / dt) 
+    # 2. Convert to indices and apply the buffer (using max/min to avoid going out of bounds)
+    idx_pairs = [(max(0, int(b[0]/dt) - buffer_idx), min(len(v), int(b[-1]/dt) + buffer_idx)) for b in bursts]
+
+    # 3. Calculate the mean peak-to-peak amplitude
+    mean_burst_amp = np.mean([np.max(v[start:end]) - np.min(v[start:end]) for start, end in idx_pairs])
+    
+
+    return {"period_ms": period, "burst_duration": duration, "duty_cycle": duty_cycle, "mean_p2p_amp": mean_burst_amp, "n_bursts": len(bursts), "onset_times": onset_times}
 
 
 def compute_phase_offset(
