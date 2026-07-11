@@ -255,7 +255,7 @@ def detect_bursts(spike_times: np.ndarray, ISI_threshold: float = 200.0, min_spi
 
 
 
-def _burst_stats_single(
+def burst_stats_single(
     v: np.ndarray,
     dt: float = 0.025,
     threshold: float = 0.0,
@@ -269,11 +269,11 @@ def _burst_stats_single(
     """
     spike_times = detect_spikes(v, dt=dt, threshold=threshold)
     # discard transient
-    spike_times = spike_times[spike_times >= burn_in_ms]
+    #spike_times = spike_times[spike_times >= burn_in_ms] #removed it cause it led to artifacts (first AB/PD burst not detected, except single spike, skewing all stats)
     bursts = detect_bursts(spike_times, ISI_threshold=max_intra_burst_isi)
 
     if len(bursts) < 2:
-        return {"period_ms": np.nan, "duty_cycle": np.nan, "onset_times": np.array([]), "n_bursts": len(bursts)}
+        return {"period_ms": np.nan, "duty_cycle": np.nan, "onset_times": np.array([]), "n_bursts": len(bursts), "n_spikes": np.array([np.nan])}
 
     onset_times = np.array([b[0] for b in bursts])
     offset_times = np.array([b[-1] for b in bursts])
@@ -329,15 +329,15 @@ def summary_statistics(
     """Extract summary statistics from a simulated voltage trace.
 
     Statistics (9 values):
-      [0] AB/PD burst period (ms)
+      [0] period (ms)
       [1] AB/PD duty cycle
-      [2] LP burst period (ms)
-      [3] LP duty cycle
-      [4] PY burst period (ms)
-      [5] PY duty cycle
-      [6] LP phase offset relative to AB/PD
-      [7] PY phase offset relative to AB/PD
-      [8] mean spike count per burst (averaged over all neurons)
+      [2] LP duty cycle
+      [3] PY duty cycle
+      [4] LP phase offset relative to AB/PD
+      [5] PY phase offset relative to AB/PD
+      [6] AB/PD mean spikes per burst
+      [7] LP mean spikes per burst
+      [8] PY mean spikes per burst
 
     Args:
         v_sim: Simulated voltage, shape (3, T).
@@ -349,47 +349,43 @@ def summary_statistics(
         Array of 9 summary statistics (NaN where computation fails).
     """
     stats_per_neuron = [
-        _burst_stats_single(v_sim[i], dt=dt, burn_in_ms=burn_in_ms, threshold=threshold)
+        burst_stats_single(v_sim[i], dt=dt, burn_in_ms=burn_in_ms, threshold=threshold)
         for i in range(3)
     ]
 
     result = np.full(9, np.nan)
 
+    # Median period across neurons (all should have the same period)
+    result[0] = jnp.mean(np.array([s["period_ms"] for s in stats_per_neuron]))
+
     # Period and duty cycle per neuron
     for i, s in enumerate(stats_per_neuron):
-        result[2 * i] = s["period_ms"]
-        result[2 * i + 1] = s["duty_cycle"]
+        result[i + 1] = s["duty_cycle"]
 
     # Phase offsets relative to AB/PD (index 0)
     ref_onsets = stats_per_neuron[0]["onset_times"]
     ref_period = stats_per_neuron[0]["period_ms"]
-    result[6] = compute_phase_offset(ref_onsets, stats_per_neuron[1]["onset_times"], ref_period)
-    result[7] = compute_phase_offset(ref_onsets, stats_per_neuron[2]["onset_times"], ref_period)
+    result[4] = compute_phase_offset(ref_onsets, stats_per_neuron[1]["onset_times"], ref_period)
+    result[5] = compute_phase_offset(ref_onsets, stats_per_neuron[2]["onset_times"], ref_period)
 
-    # Mean spike count per burst averaged across neurons
-    spike_counts = []
-    for i in range(3):
-        v_i = v_sim[i]
-        spike_times = detect_spikes(v_i[int(burn_in_ms / dt):], dt=dt, threshold=threshold)
-        bursts = detect_bursts(spike_times)
-        if bursts:
-            spike_counts.append(np.mean([len(b) for b in bursts]))
-    result[8] = float(np.mean(spike_counts)) if spike_counts else np.nan
-
+    # mean spike count calculation moved to burst_stats_single
+    # add averaged count per neuron to result[6,7,8]
+    mean_spike_counts = [jnp.median(s["n_spikes"]) if len(s["n_spikes"]) > 0 else np.nan for s in stats_per_neuron]
+    result[6:9] = mean_spike_counts
 
     return result
 
 
 STAT_LABELS = [
-    "AB/PD period (ms)",
+    "period (ms)",
     "AB/PD duty cycle",
-    "LP period (ms)",
     "LP duty cycle",
-    "PY period (ms)",
     "PY duty cycle",
     "LP phase",
     "PY phase",
-    "Mean spikes/burst",
+    "AB/PD spikes/burst",
+    "LP spikes/burst",
+    "PY spikes/burst",
 ]
 
 
@@ -490,7 +486,114 @@ def sbi_simulator(params_np: np.ndarray, t_max: float = 4000.0, dt: float = 0.02
 def check_bursting(v_sim: np.ndarray, dt: float = 0.025, burn_in_ms: float = 500.0) -> bool:
     """Return True if all three neurons show rhythmic bursting."""
     for i in range(3):
-        s = _burst_stats_single(v_sim[i], dt=dt, burn_in_ms=burn_in_ms)
+        s = burst_stats_single(v_sim[i], dt=dt, burn_in_ms=burn_in_ms)
         if np.isnan(s["period_ms"]) or s["n_bursts"] < 2:
             return False
     return True
+
+# ---------------------------------------------------------------------------
+# plot the differntial evolution loss landscape
+# ---------------------------------------------------------------------------
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+
+
+def plot_loss_landscape(history_params, history_loss, param_names):
+    """
+    Visualizes parameter sensitivity with logarithmic color scaling and
+    explicit separation of penalized network topologies.
+    """
+    P = np.array(history_params)
+    L = np.array(history_loss)
+
+    n_params = P.shape[1]
+    cols = 4
+    rows = int(np.ceil(n_params / cols))
+
+    fig, axes = plt.subplots(
+        rows,
+        cols,
+        figsize=(4 * cols, 3 * rows),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
+    )
+    axes = axes.flatten()
+
+    # Define the penalty threshold we established in the loss function
+    penalty_threshold = 10.0
+
+    # Create boolean masks to isolate the populations
+    valid_mask = L < penalty_threshold
+    failed_mask = L >= penalty_threshold
+
+    # Calculate global min and max for the valid loss to lock the colorbar scale
+    if np.any(valid_mask):
+        vmin_valid = L[valid_mask].min()
+        vmax_valid = L[valid_mask].max()
+
+    for i in range(n_params):
+        ax = axes[i]
+
+        # 1. Plot the penalized parameter sets (the "stripes")
+        if np.any(failed_mask):
+            ax.scatter(
+                P[failed_mask, i],
+                L[failed_mask],
+                alpha=0.15,
+                s=10,
+                color="gray",
+                edgecolors="none",
+                zorder=1,
+            )
+
+        # 2. Plot the valid parameter sets with a logarithmic colormap
+        if np.any(valid_mask):
+            sc = ax.scatter(
+                P[valid_mask, i],
+                L[valid_mask],
+                alpha=0.7,
+                s=20,
+                edgecolors="none",
+                c=L[valid_mask],
+                cmap="viridis",
+                norm=LogNorm(vmin=vmin_valid, vmax=vmax_valid),
+                zorder=2,
+            )
+
+        # Format axes
+        ax.set_title(
+            param_names[i] if i < len(param_names) else f"Param {i}", fontsize=10
+        )
+        if i in [3, 4, 5, 6]:
+            ax.set_xlabel("log10(g) [µS]")
+        ax.set_yscale("log")
+
+        # Draw a delimiter line indicating the penalty threshold
+        ax.axhline(
+            penalty_threshold, color="red", linestyle="--", alpha=0.3, linewidth=1
+        )
+
+        if i % cols == 0:
+            ax.set_ylabel("Feature Loss")
+
+        ax.grid(True, alpha=0.3)
+
+    # Hide any unused subplots
+    for j in range(n_params, len(axes)):
+        axes[j].set_visible(False)
+
+    # Attach a global colorbar
+    if np.any(valid_mask):
+        cbar = fig.colorbar(
+            sc,
+            ax=axes.ravel().tolist(),
+            orientation="vertical",
+            fraction=0.015,
+            pad=0.04,
+        )
+        cbar.set_label("Feature Loss (Log Scale)")
+
+    plt.show()
