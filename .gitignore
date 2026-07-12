@@ -6,3 +6,9 @@ __pycache__/
 **/*.pyc
 sbi-logs/
 **/sbi-logs/
+poster/*.aux
+poster/*.log
+poster/*.nav
+poster/*.out
+poster/*.snm
+poster/*.toc
