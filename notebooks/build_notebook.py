@@ -61,17 +61,21 @@ def keep(idx):
 BEST_LOG10_G = "[0.25495598, -1.76788206, -1.28085388, -2.16560886, -3.13587851, -4.7167629, -3.36670664]"
 
 CELL_DE_FALLBACK = code(
-    "# Best log10(g) from the completed DE run (hardcoded so the notebook is\n"
-    "# fully runnable without re-running the 2-hour optimisation cell above).\n"
+    "# Best parameters from the DE run.\n"
+    "# If the 2-hour optimisation cell above was just run, result.x is available;\n"
+    "# otherwise we fall back to the hardcoded result from a completed run\n"
+    "# (final feature loss = 0.0073, 50 iterations, 1793 function evaluations).\n"
     "try:\n"
-    "    best_log10_g_de = np.array(result.x)   # use live result if available\n"
+    "    best_log10_g_de = np.array(result.x)\n"
+    "    print(f'Using live result  — loss: {result.fun:.6f}, iters: {result.nit}, evals: {result.nfev}')\n"
     "except NameError:\n"
     f"    best_log10_g_de = np.array({BEST_LOG10_G})\n"
+    "    print('Using hardcoded result — loss: 0.00730, iters: 50, evals: 1793')\n"
     "\n"
     "g_best_de = 10.0 ** best_log10_g_de\n"
-    "print('Best DE conductances (µS):')\n"
-    "for lbl, g in zip(SYNAPSE_LABELS, g_best_de):\n"
-    "    print(f'  {lbl:30s}: {g:.5f}')\n",
+    "print('\\nBest DE conductances:')\n"
+    "for lbl, lg, g in zip(SYNAPSE_LABELS, best_log10_g_de, g_best_de):\n"
+    "    print(f'  {lbl:30s}  log10(g) = {lg:+.3f}   g = {g:.5f} µS')\n",
     id_="cell-de-fallback",
 )
 
@@ -514,8 +518,7 @@ new_cells = [
     keep(20),  # "2h warning" markdown
     keep(21),  # DE run cell (with its outputs preserved)
     keep(22),  # "results" header
-    keep(23),  # result display + best_parameter_set comment
-    CELL_DE_FALLBACK,  # NEW: define best_log10_g_de (runnable without the 2h step)
+    CELL_DE_FALLBACK,  # define best_log10_g_de (safe on fresh kernel; uses result.x if available)
     keep(24),  # load npz + loss landscape
     keep(25),  # "plot traces" header
     CELL_26_PATCHED,   # simulate best DE params (uses best_log10_g_de)
