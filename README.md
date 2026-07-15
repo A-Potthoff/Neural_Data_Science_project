@@ -114,9 +114,9 @@ jupyter notebook main.ipynb
 | JIT warmup | First `jx.integrate` compiles XLA graph | ~3 min |
 | Differential evolution | 50 iter × population 5 × ~2 s/sim | ~2 h |
 | *(skip DE: load from npz)* | `optimization_results.npz` already in repo | instant |
-| SNPE simulations | 500 sims × ~2 s | ~17 min |
+| SNPE simulations | ~2000 sims to collect 200 valid × ~2 s | ~67 min |
 | Verification | 20 posterior samples × ~2 s | ~1 min |
-| **Total (skipping DE)** | | **~21 min** |
+| **Total (skipping DE)** | | **~71 min** |
 
 The DE results are saved to `optimization_results.npz` and a hardcoded fallback is provided, so you can run the full analysis **without** re-running the 2-hour optimisation step.
 

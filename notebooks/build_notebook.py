@@ -144,7 +144,11 @@ CELL_SNPE_MD = md(
     "",
     "**Prior**: Log-uniform over [10⁻⁵, 10] µS → Uniform(−5, 1) in log₁₀-space.  ",
     "**Simulator**: 7 log₁₀-conductances → 9 summary statistics.  ",
-    "**Strategy**: one amortised round of SNPE, then posterior predictive checks.",
+    "**Strategy**: sample from the prior until **200 valid** (bursting) simulations are",
+    "collected, then train a single amortised SNPE round. Only ~10% of uniformly sampled",
+    "parameters produce rhythmic bursting, so we need ~2000 total samples to get 200 valid",
+    "ones — about 67 min. A fixed budget of 500 would yield only ~50 valid, which is",
+    "insufficient for the normalising flow to converge.",
     id_="cell-snpe-md",
 )
 
@@ -191,58 +195,47 @@ CELL_SNPE_SIM = code(
 )
 
 CELL_SNPE_RUN = code(
-    "# ── Run N_SIM forward simulations from the prior ──────────────────────────────\n"
-    "# Runtime: ~2 s / sim → 500 sims ≈ 17 min, 2000 sims ≈ 67 min.\n"
-    "# Only ~10% of log-uniform prior samples produce rhythmic bursting; the rest\n"
-    "# return NaN and are filtered before training.\n"
+    "# ── Sample from prior until MIN_VALID_TARGET valid simulations are collected ───\n"
+    "# Only ~10% of log-uniform prior samples produce rhythmic bursting; a fixed budget\n"
+    "# of 500 yields only ~50 valid — far too few for a normalising flow to converge.\n"
+    "# We keep sampling in batches until we reach 200 valid, capped at MAX_SIM total.\n"
+    "# Runtime: ~2 s / sim → expect ~2000 total samples for 200 valid ≈ 67 min.\n"
     "import time as _time\n"
     "\n"
-    "N_SIM = 500\n"
-    "theta_samples = prior.sample((N_SIM,))\n"
+    "MIN_VALID_TARGET = 200\n"
+    "MAX_SIM = 5000\n"
+    "BATCH_SIZE = 50\n"
     "\n"
-    "x_list, n_valid = [], 0\n"
+    "theta_list, x_list = [], []\n"
+    "n_valid = 0\n"
+    "n_total = 0\n"
     "t_start = _time.time()\n"
     "\n"
-    "for i, theta in enumerate(theta_samples):\n"
-    "    xi = simulator_for_sbi(theta)\n"
-    "    x_list.append(xi)\n"
-    "    if not torch.isnan(xi).any():\n"
-    "        n_valid += 1\n"
-    "    if (i + 1) % 50 == 0:\n"
-    "        elapsed = _time.time() - t_start\n"
-    "        eta = elapsed / (i + 1) * (N_SIM - i - 1)\n"
-    "        print(f'  {i+1}/{N_SIM}  valid: {n_valid}  ETA: {eta:.0f} s')\n"
+    "while n_valid < MIN_VALID_TARGET and n_total < MAX_SIM:\n"
+    "    batch_theta = prior.sample((BATCH_SIZE,))\n"
+    "    for theta in batch_theta:\n"
+    "        xi = simulator_for_sbi(theta)\n"
+    "        theta_list.append(theta)\n"
+    "        x_list.append(xi)\n"
+    "        n_total += 1\n"
+    "        if not torch.isnan(xi).any():\n"
+    "            n_valid += 1\n"
+    "        if n_valid >= MIN_VALID_TARGET:\n"
+    "            break\n"
+    "    elapsed = _time.time() - t_start\n"
+    "    rate = n_total / max(elapsed, 1e-9)\n"
+    "    remaining = max(MIN_VALID_TARGET - n_valid, 0) / max(n_valid / n_total, 1e-9) - n_total\n"
+    "    eta = remaining / max(rate, 1e-9)\n"
+    "    print(f'  {n_total} simulated, {n_valid} valid ({100*n_valid/n_total:.1f}%)  ETA: {eta:.0f} s')\n"
     "\n"
+    "theta_samples = torch.stack(theta_list)\n"
     "x_train = torch.stack(x_list)\n"
-    "print(f'\\nDone. Valid: {n_valid}/{N_SIM} ({100*n_valid/N_SIM:.0f}%)')\n",
+    "print(f'\\nDone. {n_valid}/{n_total} valid ({100*n_valid/n_total:.1f}%)')\n",
     id_="cell-snpe-run",
 )
 
 CELL_SNPE_TRAIN = code(
-    "# ── Supplement with near-Prinz seeds if random prior yields too few valid sims ─\n"
-    "# With only ~10% validity from the uniform prior, small N_SIM runs can produce\n"
-    "# too few valid samples for the normalising flow to train (std ≈ 0 → NaN scale).\n"
-    "# We add jittered Prinz-neighbourhood samples as a fallback.\n"
-    "MIN_VALID = 20\n"
-    "valid_mask_check = ~torch.isnan(x_train).any(dim=1)\n"
-    "\n"
-    "if valid_mask_check.sum() < MIN_VALID:\n"
-    "    print(f'Only {valid_mask_check.sum()} valid; supplementing with near-Prinz seeds...')\n"
-    "    rng_seed = np.random.default_rng(0)\n"
-    "    seed_log10_g = np.log10(PRINZ_G_INIT_US).astype(np.float32)\n"
-    "    extra_thetas, extra_xs = [], []\n"
-    "    for _ in range(80):\n"
-    "        jitter = rng_seed.normal(0, 0.4, 7).astype(np.float32)\n"
-    "        log10_g_j = np.clip(seed_log10_g + jitter, -5.0, 1.0)\n"
-    "        xi = simulator_for_sbi(torch.tensor(log10_g_j))\n"
-    "        extra_thetas.append(torch.tensor(log10_g_j))\n"
-    "        extra_xs.append(xi)\n"
-    "    theta_samples = torch.cat([theta_samples, torch.stack(extra_thetas)])\n"
-    "    x_train       = torch.cat([x_train,       torch.stack(extra_xs)])\n"
-    "    n_supp = (~torch.isnan(torch.stack(extra_xs)).any(dim=1)).sum().item()\n"
-    "    print(f'Added {n_supp}/80 valid supplementary simulations.')\n"
-    "\n"
-    "# ── Filter NaN rows and train SNPE ────────────────────────────────────────────\n"
+    "# ── Filter NaN rows (non-bursting) and train SNPE ────────────────────────────\n"
     "valid_mask  = ~torch.isnan(x_train).any(dim=1)\n"
     "theta_valid = theta_samples[valid_mask]\n"
     "x_valid     = x_train[valid_mask]\n"
