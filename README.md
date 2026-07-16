@@ -16,14 +16,15 @@
 
 We work with a simplified 3-neuron STG model (AB/PD, LP, PY) implemented in [Jaxley](https://jaxley.readthedocs.io/), a JAX-based differentiable neuroscience simulator. The model has **7 synaptic conductances** as free parameters (5 Glutamatergic + 2 Cholinergic).
 
-Two inference approaches are compared:
+Three inference approaches are compared:
 
 | Method | Description |
 |--------|-------------|
 | **Differential evolution** | Gradient-free global optimiser (SciPy), weighted fractional-error loss on 9 burst features, 50 iterations × population size 5 |
-| **SNPE** | Sequential Neural Posterior Estimation (sbi / SNPE-C), log-uniform prior, same 9-feature summary statistics |
+| **Gradient descent** (empirical comparison) | Adam + gradient-norm clipping on a differentiable MSE-voltage loss, 3 restarts × 200 steps, log₁₀-conductance space |
+| **SNPE** | Sequential Neural Posterior Estimation (sbi / SNPE-C), log-uniform prior, same 9-feature summary statistics, trained on ≥10,000 simulations |
 
-Comparing the DE point estimate with the SNPE posterior directly answers the degeneracy question (Prinz et al. 2004).
+Comparing the DE point estimate with the SNPE posterior directly answers the degeneracy question (Prinz et al. 2004); the gradient-descent run empirically confirms why DE was preferred over a differentiable approach in the first place.
 
 ---
 
@@ -43,6 +44,8 @@ Differential evolution sidesteps both problems:
 - As a **population-based global search**, it is far less likely to get stuck in local minima than gradient-based methods.
 
 In practice, DE converged to a feature loss of **0.0073** (roughly 7% fractional error across all features), producing a trace that visually and quantitatively matches the observation.
+
+**Empirical confirmation** (notebook section 5b): we also ran gradient descent for real — Adam (lr=0.02, grad-norm clipping) on a subsampled MSE-voltage loss, 3 restarts from different initialisations, 200 steps each. Final losses: **256.8, 248.3, 322.95 mV²** (vs. the pre-DE Prinz-init loss of ~315-350) — noticeably improved, but each restart converges to a *different* optimum (evidence of a multi-modal loss landscape), and the best restart's full-trace verification still fails to reproduce PY bursting. DE's feature loss (0.0073) reflects an essentially complete fit by comparison.
 
 ---
 
@@ -107,18 +110,21 @@ cd notebooks/
 jupyter notebook main.ipynb
 ```
 
-**Expected runtime** (Apple M-series / modern CPU):
+**Expected runtime** (Apple M-series / modern CPU; measured on a real run):
 
 | Section | Detail | Time |
 |---------|--------|------|
 | JIT warmup | First `jx.integrate` compiles XLA graph | ~3 min |
-| Differential evolution | 50 iter × population 5 × ~2 s/sim | ~2 h |
+| Differential evolution | 50 iter × population 5 × ~2 s/sim (non-JIT'd, single-sample simulator) | ~2 h |
 | *(skip DE: load from npz)* | `optimization_results.npz` already in repo | instant |
-| SNPE simulations | ~2000 sims to collect 200 valid × ~2 s | ~67 min |
-| Verification | 20 posterior samples × ~2 s | ~1 min |
-| **Total (skipping DE)** | | **~71 min** |
+| Gradient descent (5b) | Adam, 3 restarts × 200 steps × ~2.5 s/step | ~25 min |
+| SNPE simulations | JIT + `vmap`-batched simulator (batch 50), sampled until ≥1000 valid | ~14.5 min (10,850 sims, 1,001 valid, measured) |
+| SNPE training + verification | Flow training (202 epochs) + 20 batched posterior-predictive samples | ~1-2 min |
+| **Total (skipping DE)** | | **~41 min (measured)** |
 
-The DE results are saved to `optimization_results.npz` and a hardcoded fallback is provided, so you can run the full analysis **without** re-running the 2-hour optimisation step.
+The DE results are saved to `optimization_results.npz` and a hardcoded fallback is provided, so you can run the full analysis **without** re-running the 2-hour optimisation step (skip that one cell — the notebook is designed for this and warns you above it).
+
+**Why so much faster than before**: the SNPE simulator used to rebuild the whole Jaxley network from scratch on every call and never JIT-compiled `jx.integrate` (~2 s/simulation). `utils.py` now exposes `build_batched_simulator()`, which builds the network once and wraps integration in `jax.jit(jax.vmap(...))` so a whole batch of parameter sets is simulated in a single compiled XLA call — measured at **~0.08-0.1 s/simulation (batch size 50), a ~20× speedup**. This is what makes a ≥10,000-simulation SNPE training budget (the rule-of-thumb minimum for a reliably-trained normalising flow) tractable in minutes instead of hours.
 
 To rebuild `main.ipynb` from source after editing `build_notebook.py`:
 

@@ -14,3 +14,4 @@ openTSNE
 nbdev
 pre-commit
 nbdime
+optax

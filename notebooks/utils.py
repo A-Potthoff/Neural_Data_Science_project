@@ -491,6 +491,150 @@ def check_bursting(v_sim: np.ndarray, dt: float = 0.025, burn_in_ms: float = 500
             return False
     return True
 
+
+# ---------------------------------------------------------------------------
+# Batched (JIT + vmap) simulator for fast SBI sampling
+# ---------------------------------------------------------------------------
+#
+# `simulate()` / `sbi_simulator()` above rebuild a brand-new PyloricNetwork()
+# from scratch on every single call (~0.5-1.0 s) and never JIT-compile
+# `jx.integrate`, so re-tracing dominates the remaining cost. Combined that is
+# roughly 2 s/simulation, which makes collecting >1000 valid simulations for
+# SNPE impractical.
+#
+# The fix: build the network ONCE (as `build_network_for_grad` already does
+# for gradient descent), JIT-compile the single-simulation function, and wrap
+# it in `jax.vmap` so a whole batch of parameter sets is integrated in one
+# compiled XLA call. Benchmarked on this model at t_max=4000 ms: ~2 s/sim
+# (naive, sequential) -> ~0.08-0.1 s/sim (batched, batch size 50), i.e. a
+# ~20x speedup.
+
+
+def build_batched_simulator(t_max: float = 4000.0, dt: float = 0.025):
+    """Build a JIT-compiled, vmapped Jaxley simulator.
+
+    Returns:
+        (sim_batch_fn, param_keys) where sim_batch_fn maps a JAX array of
+        shape (B, 7) of log10(g_syn / µS) to simulated voltages of shape
+        (B, 3, T). param_keys is the parameter-name list (order matches the
+        7 synapses / SYNAPSE_LABELS).
+    """
+    import jax
+    import jaxley as jx
+
+    net, param_keys = build_network_for_grad()
+
+    def single_sim(log10_g):
+        params = make_params_from_log10g(param_keys, log10_g)
+        return jx.integrate(net, params=params, t_max=t_max, delta_t=dt)
+
+    sim_batch_fn = jax.jit(jax.vmap(single_sim, in_axes=0))
+    return sim_batch_fn, param_keys
+
+
+def summary_statistics_batch(v_batch: np.ndarray, dt: float = 0.025) -> np.ndarray:
+    """Apply `summary_statistics` to each simulation in a batch.
+
+    Args:
+        v_batch: Simulated voltages, shape (B, 3, T).
+        dt: Time step of v_batch in ms.
+
+    Returns:
+        Array of shape (B, 9), NaN rows for simulations where feature
+        extraction failed (e.g. non-bursting or numerically unstable trace).
+    """
+    stats = np.full((v_batch.shape[0], 9), np.nan, dtype=np.float32)
+    for i in range(v_batch.shape[0]):
+        try:
+            stats[i] = summary_statistics(np.asarray(v_batch[i]), dt=dt).astype(np.float32)
+        except Exception:
+            pass
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Gradient descent (Adam) — empirical comparison against differential evolution
+# ---------------------------------------------------------------------------
+#
+# Recipe adapted from an earlier gradient-descent-only version of this project
+# (branch `feature/pyloric-inference`), which confirmed the same T_GD=2000 ms
+# checkpointed MSE loss + Adam(lr=0.02) + grad-norm-clipping(5.0) runs at
+# ~2.5 s/step and converges to different optima from different restarts. We
+# additionally log the full log10(g) trajectory (not just the loss) at every
+# step so the parameter path can be visualised (e.g. a pairwise plot).
+
+
+def build_gd_loss_and_grad(
+    net, param_keys: list, v_obs_jax, t_gd: float = 2000.0, subsample: int = 10
+):
+    """JIT-compiled value-and-grad of MSE(subsampled sim, subsampled obs).
+
+    Args:
+        net: Shared jaxley Network (e.g. from build_network_for_grad()).
+        param_keys: Parameter name list from build_network_for_grad().
+        v_obs_jax: Observed voltage, shape (3, T_obs), JAX array.
+        t_gd: Duration (ms) simulated for the GD loss — shorter than the full
+            4 s recording to keep each gradient step affordable.
+        subsample: Subsampling factor (sim dt=0.025 ms -> obs dt=0.25 ms at 10).
+
+    Returns:
+        Jitted function log10_g -> (loss, grad).
+    """
+    import jax
+    import jaxley as jx
+
+    n_obs_gd = int(t_gd / (0.025 * subsample))
+
+    def loss_fn(log10_g):
+        params = make_params_from_log10g(param_keys, log10_g)
+        v_sim = jx.integrate(
+            net, params=params, t_max=t_gd, delta_t=0.025, checkpoint_lengths=[400, 200]
+        )
+        v_sub = v_sim[:, ::subsample]
+        n = min(v_sub.shape[1], n_obs_gd)
+        return jnp.mean((v_sub[:, :n] - v_obs_jax[:, :n]) ** 2)
+
+    return jax.jit(jax.value_and_grad(loss_fn))
+
+
+def run_gradient_descent(
+    loss_and_grad_fn,
+    log10_g_init,
+    n_steps: int = 200,
+    lr: float = 0.02,
+    log_every: int = 50,
+):
+    """Adam gradient descent (with gradient-norm clipping) in log10(g)-space.
+
+    Returns:
+        (log10_g_final, loss_history, param_history): loss_history is a list
+        of length n_steps; param_history is an array of shape (n_steps, 7) —
+        the log10(g) trajectory, used for the pairwise parameter plot.
+    """
+    import optax
+
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(5.0),
+        optax.adam(lr),
+    )
+    opt_state = optimizer.init(log10_g_init)
+    log10_g = log10_g_init
+
+    loss_history: List[float] = []
+    param_history: List[np.ndarray] = []
+
+    for step in range(n_steps):
+        loss, grad = loss_and_grad_fn(log10_g)
+        updates, opt_state = optimizer.update(grad, opt_state)
+        log10_g = optax.apply_updates(log10_g, updates)
+        log10_g = jnp.clip(log10_g, -5.0, 1.0)
+        loss_history.append(float(loss))
+        param_history.append(np.array(log10_g))
+        if log_every and step % log_every == 0:
+            print(f"  step {step:3d}: loss = {loss:.2f}")
+
+    return log10_g, loss_history, np.array(param_history)
+
 # ---------------------------------------------------------------------------
 # plot the differntial evolution loss landscape
 # ---------------------------------------------------------------------------

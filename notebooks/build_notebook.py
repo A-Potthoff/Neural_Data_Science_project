@@ -131,6 +131,208 @@ CELL_27_PATCHED = code(
     id_="cell-027",
 )
 
+# ── DE convergence diagnostics (loss over time + pairwise parameter plot) ────
+
+CELL_DE_DIAG_MD = md(
+    "### Convergence diagnostics",
+    "",
+    "Two additional views of the same `optimization_results.npz` archive: the loss",
+    "trajectory across all function evaluations (showing whether/when DE converges),",
+    "and a pairwise view of every evaluated parameter combination (showing whether the",
+    "population collapses onto a compact, bursting region or stays spread out).",
+    id_="cell-de-diag-md",
+)
+
+CELL_DE_LOSS_OVER_TIME = code(
+    "# Loss value over the course of the optimisation (evaluation order).\n"
+    "# DE evaluates popsize x (maxiter+1) candidates per generation; the running\n"
+    "# minimum traces out the convergence curve regardless of per-candidate noise.\n"
+    "fig, ax = plt.subplots(figsize=(9, 4), layout='constrained')\n"
+    "evals = np.arange(1, len(loaded_losses) + 1)\n"
+    "running_min = np.minimum.accumulate(loaded_losses)\n"
+    "\n"
+    "ax.scatter(evals, loaded_losses, s=6, alpha=0.25, color='C0', label='Evaluated loss')\n"
+    "ax.plot(evals, running_min, color='C3', lw=2, label='Best-so-far (running min)')\n"
+    "ax.axhline(10.0, color='gray', ls='--', lw=1, alpha=0.6, label='NaN penalty threshold')\n"
+    "ax.set_yscale('log')\n"
+    "ax.set_xlabel('Function evaluation')\n"
+    "ax.set_ylabel('Feature loss (log scale)')\n"
+    "ax.set_title('Differential evolution: loss over the course of optimisation')\n"
+    "ax.legend(fontsize=8)\n"
+    "fig.savefig('fig_de_loss_over_time.pdf', bbox_inches='tight')\n"
+    "plt.show()\n"
+    "\n"
+    "print(f'Best loss reached: {running_min[-1]:.4f} '\n"
+    "      f'at evaluation {int(np.argmin(loaded_losses)) + 1}/{len(loaded_losses)}')\n",
+    id_="cell-de-loss-over-time",
+)
+
+CELL_DE_PAIRPLOT = code(
+    "# Pairwise parameter plot for the DE search: which conductance combinations\n"
+    "# were explored, and did the population converge to a compact bursting region?\n"
+    "import seaborn as sns\n"
+    "\n"
+    "de_param_cols = [lbl[:12] for lbl in SYNAPSE_LABELS]\n"
+    "df_de_params = pd.DataFrame(loaded_params, columns=de_param_cols)\n"
+    "df_de_params['bursting'] = loaded_losses < 10.0  # below the NaN-penalty threshold\n"
+    "\n"
+    "g_de = sns.PairGrid(\n"
+    "    df_de_params, hue='bursting', vars=de_param_cols,\n"
+    "    palette={True: 'C0', False: 'lightgray'}, corner=True,\n"
+    ")\n"
+    "g_de.map_diag(sns.histplot, bins=20)\n"
+    "g_de.map_lower(sns.scatterplot, s=8, alpha=0.4)\n"
+    "g_de.add_legend(title='bursting?')\n"
+    "g_de.fig.suptitle('Differential evolution: explored parameter space (log₁₀(g) / µS)', y=1.02)\n"
+    "g_de.fig.savefig('fig_de_pairplot.pdf', bbox_inches='tight')\n"
+    "plt.show()\n",
+    id_="cell-de-pairplot",
+)
+
+# ── Gradient descent (empirical comparison against DE) ────────────────────────
+
+CELL_GD_MD = md(
+    "## 5b  Gradient descent — empirical comparison",
+    "",
+    "Section 5 explained *why* we expected gradient descent to underperform differential",
+    "evolution (non-differentiable features, phase-sensitive MSE). Here we confirm that",
+    "empirically with a real run, reusing the differentiable network `net_grad` /",
+    "`param_keys_grad` already built for the DE loss above.",
+    "",
+    "**Loss**: MSE between the simulated and observed voltage, subsampled to the",
+    "observation's dt = 0.25 ms. To keep each gradient step affordable we optimise",
+    "against the first **2 s** of the recording (`T_GD`) rather than the full 4 s, and use",
+    "Jaxley's `checkpoint_lengths` to bound the memory cost of backpropagating through",
+    "the ODE solve.  ",
+    "**Optimiser**: Adam (lr = 0.02) with global gradient-norm clipping, in log₁₀-space.  ",
+    "**Restarts**: 3 — the Prinz-inspired init used for DE, plus two random initialisations",
+    "— since a single run only reveals one local optimum of a possibly multi-modal loss.",
+    id_="cell-gd-md",
+)
+
+CELL_GD_SETUP = code(
+    "import time as _time\n"
+    "\n"
+    "# Re-uses net_grad / param_keys_grad from the DE section above (cell '0. Restore\n"
+    "# network initialization') — no need to rebuild the network a third time.\n"
+    "v_obs_jax = jnp.array(v_obs)\n"
+    "T_GD = 2000.0   # ms used for the GD loss (full 4 s reserved for verification)\n"
+    "\n"
+    "gd_loss_and_grad = build_gd_loss_and_grad(\n"
+    "    net_grad, param_keys_grad, v_obs_jax, t_gd=T_GD, subsample=10\n"
+    ")\n"
+    "\n"
+    "# JIT warmup (first call compiles; empirically ~2.5 s thereafter per step)\n"
+    "t0 = _time.time()\n"
+    "_loss0, _ = gd_loss_and_grad(jnp.log10(jnp.array(PRINZ_G_INIT_US)))\n"
+    "print(f'JIT compiled in {_time.time() - t0:.1f} s. Loss at Prinz init: {float(_loss0):.2f}')\n"
+    "print('Each gradient step ~2.5 s; 200 steps x 3 restarts ~ 25 min.')\n",
+    id_="cell-gd-setup",
+)
+
+CELL_GD_RESTART1 = code(
+    "print('=== Restart 1: Prinz bursting init ===')\n"
+    "log10_init_1 = jnp.log10(jnp.array(PRINZ_G_INIT_US))\n"
+    "log10_opt_1, hist_1, params_hist_1 = run_gradient_descent(gd_loss_and_grad, log10_init_1)\n"
+    "print(f'  Final loss: {hist_1[-1]:.2f}')\n"
+    "print(f'  g_opt (µS): {[f\"{x:.4f}\" for x in 10 ** np.array(log10_opt_1)]}')\n",
+    id_="cell-gd-restart1",
+)
+
+CELL_GD_RESTART2 = code(
+    "rng_gd = np.random.default_rng(42)\n"
+    "log10_init_2 = jnp.array(rng_gd.uniform(-2.5, -0.5, size=7))\n"
+    "print('=== Restart 2: random init ===')\n"
+    "log10_opt_2, hist_2, params_hist_2 = run_gradient_descent(gd_loss_and_grad, log10_init_2)\n"
+    "print(f'  Final loss: {hist_2[-1]:.2f}')\n"
+    "print(f'  g_opt (µS): {[f\"{x:.4f}\" for x in 10 ** np.array(log10_opt_2)]}')\n",
+    id_="cell-gd-restart2",
+)
+
+CELL_GD_RESTART3 = code(
+    "log10_init_3 = jnp.array(rng_gd.uniform(-2.5, -0.5, size=7))\n"
+    "print('=== Restart 3: random init ===')\n"
+    "log10_opt_3, hist_3, params_hist_3 = run_gradient_descent(gd_loss_and_grad, log10_init_3)\n"
+    "print(f'  Final loss: {hist_3[-1]:.2f}')\n"
+    "print(f'  g_opt (µS): {[f\"{x:.4f}\" for x in 10 ** np.array(log10_opt_3)]}')\n",
+    id_="cell-gd-restart3",
+)
+
+CELL_GD_LEARNING_CURVES = code(
+    "# Learning curves: does each restart converge, and to what loss level?\n"
+    "fig, ax = plt.subplots(figsize=(8, 3.5), layout='constrained')\n"
+    "ax.semilogy(hist_1, label='Restart 1 (Prinz init)')\n"
+    "ax.semilogy(hist_2, label='Restart 2 (random)')\n"
+    "ax.semilogy(hist_3, label='Restart 3 (random)')\n"
+    "ax.set_xlabel('Gradient step')\n"
+    "ax.set_ylabel('MSE loss (mV²)')\n"
+    "ax.set_title('Gradient descent learning curves (3 restarts)')\n"
+    "ax.legend(fontsize=9)\n"
+    "fig.savefig('fig_gd_learning_curves.pdf', bbox_inches='tight')\n"
+    "plt.show()\n",
+    id_="cell-gd-learning-curves",
+)
+
+CELL_GD_PAIRPLOT = code(
+    "# Pairwise parameter plot: the full log10(g) trajectory of all 3 restarts\n"
+    "# (200 steps each). Restarts landing in different, non-overlapping clouds is\n"
+    "# direct evidence of a multi-modal loss landscape — exactly what motivated\n"
+    "# using differential evolution's population-based global search instead.\n"
+    "gd_param_cols = [lbl[:12] for lbl in SYNAPSE_LABELS]\n"
+    "df_gd_traj = pd.concat([\n"
+    "    pd.DataFrame(params_hist_1, columns=gd_param_cols).assign(restart='Restart 1'),\n"
+    "    pd.DataFrame(params_hist_2, columns=gd_param_cols).assign(restart='Restart 2'),\n"
+    "    pd.DataFrame(params_hist_3, columns=gd_param_cols).assign(restart='Restart 3'),\n"
+    "], ignore_index=True)\n"
+    "\n"
+    "g_gd = sns.PairGrid(df_gd_traj, hue='restart', vars=gd_param_cols, corner=True)\n"
+    "g_gd.map_diag(sns.histplot, bins=20)\n"
+    "g_gd.map_lower(sns.scatterplot, s=6, alpha=0.35)\n"
+    "g_gd.add_legend(title='restart')\n"
+    "g_gd.fig.suptitle('Gradient descent: parameter trajectories (log₁₀(g) / µS)', y=1.02)\n"
+    "g_gd.fig.savefig('fig_gd_pairplot.pdf', bbox_inches='tight')\n"
+    "plt.show()\n",
+    id_="cell-gd-pairplot",
+)
+
+CELL_GD_VERIFY = code(
+    "# Best restart: simulate the full 4 s recording and compare against observation\n"
+    "all_gd_results = [\n"
+    "    (hist_1[-1], log10_opt_1, 'Restart 1'),\n"
+    "    (hist_2[-1], log10_opt_2, 'Restart 2'),\n"
+    "    (hist_3[-1], log10_opt_3, 'Restart 3'),\n"
+    "]\n"
+    "best_gd_loss, log10_opt_best_gd, best_gd_label = sorted(all_gd_results, key=lambda r: r[0])[0]\n"
+    "g_opt_best_gd = 10.0 ** np.array(log10_opt_best_gd)\n"
+    "\n"
+    "print(f'Best restart: {best_gd_label}, loss={best_gd_loss:.2f}')\n"
+    "print('Optimised conductances (µS):')\n"
+    "for lbl, g in zip(SYNAPSE_LABELS, g_opt_best_gd):\n"
+    "    print(f'  {lbl:30s}: {g:.5f}')\n"
+    "\n"
+    "_, v_gd_best = simulate(g_opt_best_gd, t_max=4000.0, dt=0.025)\n"
+    "stats_gd_best = summary_statistics(v_gd_best, dt=0.025)\n"
+    "df_gd_cmp = pd.DataFrame({\n"
+    "    'Statistic': STAT_LABELS, 'Observed': TARGET_STATS, 'GD best-fit': stats_gd_best,\n"
+    "})\n"
+    "print('\\nSummary statistics comparison:')\n"
+    "print(df_gd_cmp.to_string(index=False))\n"
+    "\n"
+    "fig, axs = plt.subplots(3, 1, figsize=(14, 6), sharex=True, layout='constrained')\n"
+    "n_gd = min(len(t_obs), v_gd_best.shape[1])\n"
+    "for i, name in enumerate(['AB/PD', 'LP', 'PY']):\n"
+    "    axs[i].plot(t_obs, v_obs[i], color='k', lw=0.8, alpha=0.6, label='Observed')\n"
+    "    axs[i].plot(t_obs[:n_gd], v_gd_best[i, :n_gd], color='C1', lw=0.9, alpha=0.9, label='GD best-fit')\n"
+    "    axs[i].set_ylabel('V (mV)')\n"
+    "    axs[i].set_title(name)\n"
+    "axs[-1].set_xlabel('t (ms)')\n"
+    "axs[0].legend(fontsize=9)\n"
+    "fig.suptitle(f'Observed vs gradient-descent fit ({best_gd_label}, loss={best_gd_loss:.1f})', fontsize=11)\n"
+    "fig.savefig('fig_gd_fit.pdf', bbox_inches='tight')\n"
+    "plt.show()\n",
+    id_="cell-gd-verify",
+)
+
 # ── SNPE section (cells 34-40 with fixes) ─────────────────────────────────────
 
 CELL_SNPE_MD = md(
@@ -144,11 +346,18 @@ CELL_SNPE_MD = md(
     "",
     "**Prior**: Log-uniform over [10⁻⁵, 10] µS → Uniform(−5, 1) in log₁₀-space.  ",
     "**Simulator**: 7 log₁₀-conductances → 9 summary statistics.  ",
-    "**Strategy**: sample from the prior until **200 valid** (bursting) simulations are",
-    "collected, then train a single amortised SNPE round. Only ~10% of uniformly sampled",
-    "parameters produce rhythmic bursting, so we need ~2000 total samples to get 200 valid",
-    "ones — about 67 min. A fixed budget of 500 would yield only ~50 valid, which is",
-    "insufficient for the normalising flow to converge.",
+    "**Speed**: the naive simulator (used for DE above) rebuilds the whole Jaxley network",
+    "from scratch on every call and never JIT-compiles `jx.integrate`, costing ~2 s/simulation.",
+    "For SNPE we need far more simulations, so we build the network **once** and wrap",
+    "`jx.integrate` in `jax.jit` + `jax.vmap` to integrate a whole batch of parameter sets",
+    "in a single compiled XLA call. Measured speedup: ~0.08–0.1 s/simulation at batch size 50",
+    "— roughly a **20× speedup**.",
+    "",
+    "**Strategy**: sample from the prior in batches of 50 until **1,000 valid** (bursting)",
+    "simulations are collected, capped at 15,000 total. `sbi`'s rule of thumb is ≥10,000",
+    "training simulations for a reliably-trained normalising flow; at our ~10% validity",
+    "rate that means ~1,000 valid ones. With the batched simulator this takes ~15–20 min,",
+    "instead of the >5 h a sequential, non-JIT'd simulator would need for the same budget.",
     id_="cell-snpe-md",
 )
 
@@ -171,39 +380,34 @@ CELL_SNPE_SETUP = code(
 )
 
 CELL_SNPE_SIM = code(
-    "def simulator_for_sbi(log10_g_tensor):\n"
-    "    \"\"\"Wraps the Jaxley simulator for sbi: Tensor → summary-stat Tensor.\n"
+    "import time as _time\n"
     "\n"
-    "    Returns a 9-element tensor with NaN entries for non-bursting simulations;\n"
-    "    sbi handles NaN rows by filtering them out before training.\n"
-    "    \"\"\"\n"
-    "    log10_g = log10_g_tensor.numpy().astype(np.float64)\n"
-    "    g_us = np.clip(10.0 ** log10_g, 1e-6, 15.0)\n"
-    "    try:\n"
-    "        _, v_sim = simulate(g_us, t_max=4000.0, dt=0.025)\n"
-    "        stats = summary_statistics(v_sim, dt=0.025).astype(np.float32)\n"
-    "    except Exception:\n"
-    "        stats = np.full(9, np.nan, dtype=np.float32)\n"
-    "    return torch.tensor(stats)\n"
+    "# Build the JIT-compiled, vmapped batch simulator ONCE and reuse it for every\n"
+    "# batch below. This sidesteps the two costs that dominate the naive per-sample\n"
+    "# path used for DE: rebuilding the whole Jaxley network from scratch on every\n"
+    "# call (~0.5-1 s), and re-tracing `jx.integrate` (no JIT cache reuse).\n"
+    "sim_batch_fn, param_keys_sbi = build_batched_simulator(t_max=4000.0, dt=0.025)\n"
     "\n"
-    "# Quick sanity check with the Prinz init — should return finite stats\n"
-    "test_g = torch.tensor(np.log10(PRINZ_G_INIT_US).astype(np.float32))\n"
-    "test_out = simulator_for_sbi(test_g)\n"
-    "print('Simulator test (Prinz init):', test_out)\n"
-    "print('All finite:', not torch.isnan(test_out).any().item())\n",
+    "# Sanity check: batch of 4 copies of the Prinz init — should return finite stats\n"
+    "_test_batch = np.tile(np.log10(PRINZ_G_INIT_US), (4, 1))\n"
+    "t0 = _time.time()\n"
+    "_test_v = np.array(sim_batch_fn(jnp.array(_test_batch)))\n"
+    "print(f'Batch simulator compiled + ran in {_time.time() - t0:.2f} s '\n"
+    "      f'for a batch of {_test_v.shape[0]} (output shape {_test_v.shape})')\n"
+    "_test_stats = summary_statistics_batch(_test_v, dt=0.025)\n"
+    "print('All finite (bursting):', not np.isnan(_test_stats).any())\n",
     id_="cell-snpe-sim",
 )
 
 CELL_SNPE_RUN = code(
-    "# ── Sample from prior until MIN_VALID_TARGET valid simulations are collected ───\n"
-    "# Only ~10% of log-uniform prior samples produce rhythmic bursting; a fixed budget\n"
-    "# of 500 yields only ~50 valid — far too few for a normalising flow to converge.\n"
-    "# We keep sampling in batches until we reach 200 valid, capped at MAX_SIM total.\n"
-    "# Runtime: ~2 s / sim → expect ~2000 total samples for 200 valid ≈ 67 min.\n"
-    "import time as _time\n"
-    "\n"
-    "MIN_VALID_TARGET = 200\n"
-    "MAX_SIM = 5000\n"
+    "# ── Sample from the prior in batches, using the JIT+vmap simulator ──────────\n"
+    "# Only ~10% of log-uniform prior samples produce rhythmic bursting on all three\n"
+    "# neurons. `sbi`'s rule of thumb is >=10,000 training simulations for a reliably\n"
+    "# trained normalising flow; at our ~10% validity rate that means ~1,000 valid.\n"
+    "# The batched simulator makes this tractable: ~0.08-0.1 s/sim (vs ~2 s/sim\n"
+    "# sequential) -> ~15-20 min for 10,000+ simulations, instead of several hours.\n"
+    "MIN_VALID_TARGET = 1000\n"
+    "MAX_SIM = 15000\n"
     "BATCH_SIZE = 50\n"
     "\n"
     "theta_list, x_list = [], []\n"
@@ -213,24 +417,26 @@ CELL_SNPE_RUN = code(
     "\n"
     "while n_valid < MIN_VALID_TARGET and n_total < MAX_SIM:\n"
     "    batch_theta = prior.sample((BATCH_SIZE,))\n"
-    "    for theta in batch_theta:\n"
-    "        xi = simulator_for_sbi(theta)\n"
-    "        theta_list.append(theta)\n"
-    "        x_list.append(xi)\n"
-    "        n_total += 1\n"
-    "        if not torch.isnan(xi).any():\n"
-    "            n_valid += 1\n"
-    "        if n_valid >= MIN_VALID_TARGET:\n"
-    "            break\n"
+    "    log10_g_batch = batch_theta.numpy().astype(np.float64)\n"
+    "    v_batch = np.array(sim_batch_fn(jnp.array(log10_g_batch)))\n"
+    "    stats_batch = summary_statistics_batch(v_batch, dt=0.025)\n"
+    "\n"
+    "    theta_list.append(batch_theta)\n"
+    "    x_list.append(torch.tensor(stats_batch))\n"
+    "    n_total += BATCH_SIZE\n"
+    "    n_valid += int((~np.isnan(stats_batch).any(axis=1)).sum())\n"
+    "\n"
     "    elapsed = _time.time() - t_start\n"
     "    rate = n_total / max(elapsed, 1e-9)\n"
-    "    remaining = max(MIN_VALID_TARGET - n_valid, 0) / max(n_valid / n_total, 1e-9) - n_total\n"
+    "    remaining = max(MIN_VALID_TARGET - n_valid, 0) / max(n_valid / n_total, 1e-9)\n"
     "    eta = remaining / max(rate, 1e-9)\n"
-    "    print(f'  {n_total} simulated, {n_valid} valid ({100*n_valid/n_total:.1f}%)  ETA: {eta:.0f} s')\n"
+    "    print(f'  {n_total} simulated, {n_valid} valid ({100*n_valid/n_total:.1f}%)  '\n"
+    "          f'[{elapsed:.0f}s elapsed, ETA: {eta:.0f} s]')\n"
     "\n"
-    "theta_samples = torch.stack(theta_list)\n"
-    "x_train = torch.stack(x_list)\n"
-    "print(f'\\nDone. {n_valid}/{n_total} valid ({100*n_valid/n_total:.1f}%)')\n",
+    "theta_samples = torch.cat(theta_list, dim=0)\n"
+    "x_train = torch.cat(x_list, dim=0)\n"
+    "print(f'\\nDone in {_time.time() - t_start:.0f} s. '\n"
+    "      f'{n_valid}/{n_total} valid ({100*n_valid/n_total:.1f}%)')\n",
     id_="cell-snpe-run",
 )
 
@@ -311,30 +517,22 @@ CELL_DEG_MD = md(
 )
 
 CELL_DEG_SIM = code(
-    "# Simulate N_VERIFY random draws from the posterior and the DE best solution\n"
+    "# Simulate N_VERIFY random draws from the posterior — batched (one JIT'd XLA\n"
+    "# call for all 20), reusing the simulator built for SNPE sampling above.\n"
     "N_VERIFY = 20\n"
     "rng_verify = np.random.default_rng(0)\n"
     "idx_verify = rng_verify.choice(N_POSTERIOR, N_VERIFY, replace=False)\n"
-    "g_verify   = 10.0 ** ps_np[idx_verify]   # (N_VERIFY, 7) µS\n"
+    "log10_g_verify = ps_np[idx_verify]   # (N_VERIFY, 7) log10(µS)\n"
+    "g_verify       = 10.0 ** log10_g_verify\n"
     "\n"
-    "v_verify_list  = []   # subsampled traces (3, T_obs)\n"
-    "stats_verify   = []   # 9-element summary stat vector per sample\n"
+    "print(f'Simulating {N_VERIFY} posterior samples...')\n"
+    "t0 = _time.time()\n"
+    "v_verify_batch = np.array(sim_batch_fn(jnp.array(log10_g_verify)))\n"
+    "print(f'  done in {_time.time() - t0:.2f} s')\n"
     "\n"
-    "print(f'Simulating {N_VERIFY} posterior samples + DE best solution...')\n"
-    "for k, g_k in enumerate(g_verify):\n"
-    "    try:\n"
-    "        _, v_k = simulate(g_k, t_max=4000.0, dt=0.025)\n"
-    "        n = min(v_obs.shape[1], v_k.shape[1])\n"
-    "        v_verify_list.append(v_k[:, :n])\n"
-    "        stats_verify.append(summary_statistics(v_k, dt=0.025))\n"
-    "    except Exception as e:\n"
-    "        print(f'  Sample {k} failed: {e}')\n"
-    "        v_verify_list.append(None)\n"
-    "        stats_verify.append(np.full(9, np.nan))\n"
-    "    if (k + 1) % 5 == 0:\n"
-    "        print(f'  {k+1}/{N_VERIFY} done')\n"
-    "\n"
-    "stats_verify = np.array(stats_verify)\n"
+    "n_v = min(v_obs.shape[1], v_verify_batch.shape[2])\n"
+    "v_verify_list = [v_verify_batch[k, :, :n_v] for k in range(N_VERIFY)]\n"
+    "stats_verify  = summary_statistics_batch(v_verify_batch, dt=0.025)\n"
     "print('Done.')\n",
     id_="cell-deg-sim",
 )
@@ -512,10 +710,21 @@ new_cells = [
     keep(21),  # DE run cell (with its outputs preserved)
     keep(22),  # "results" header
     CELL_DE_FALLBACK,  # define best_log10_g_de (safe on fresh kernel; uses result.x if available)
-    keep(24),  # load npz + loss landscape
-    keep(25),  # "plot traces" header
+    keep(24),  # redundant fallback cell (harmless duplicate of CELL_DE_FALLBACK, kept as-is)
+    keep(25),  # load npz + loss landscape (defines loaded_params / loaded_losses / loaded_names)
+    CELL_DE_DIAG_MD,       # convergence diagnostics header
+    CELL_DE_LOSS_OVER_TIME,  # DE loss value over time (evaluation order) — needs loaded_losses
+    CELL_DE_PAIRPLOT,        # pairwise parameter plot for the DE search — needs loaded_params
     CELL_26_PATCHED,   # simulate best DE params (uses best_log10_g_de)
     CELL_27_PATCHED,   # trace overlay plot (uses v_best_de)
+    CELL_GD_MD,
+    CELL_GD_SETUP,
+    CELL_GD_RESTART1,
+    CELL_GD_RESTART2,
+    CELL_GD_RESTART3,
+    CELL_GD_LEARNING_CURVES,
+    CELL_GD_PAIRPLOT,
+    CELL_GD_VERIFY,
     CELL_SNPE_MD,
     CELL_SNPE_SETUP,
     CELL_SNPE_SIM,

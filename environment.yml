@@ -21,3 +21,4 @@ dependencies:
     - nbdev
     - pre-commit
     - nbdime
+    - optax
