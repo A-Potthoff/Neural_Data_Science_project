@@ -97,6 +97,11 @@ CELL_27_PATCHED = code(
     "cell_names = ['AB/PD', 'LP', 'PY']\n"
     "colors = {'obs': '#2b6a9e', 'sim': '#d95f02'}\n"
     "\n"
+    "# v_best_de is at the simulator's dt=0.025 ms; subsample by the dt ratio (10x)\n"
+    "# to match t_obs's dt=0.25 ms BEFORE truncating by length — slicing by raw index\n"
+    "# count instead would silently keep only the first ~400 ms of a 4 s simulation.\n"
+    "v_best_de_sub = v_best_de[:, ::10]\n"
+    "\n"
     "for i, name in enumerate(cell_names):\n"
     "    ax_obs = axs[i * 2]       # even rows: observed\n"
     "    ax_sim = axs[i * 2 + 1]   # odd  rows: simulated\n"
@@ -111,8 +116,8 @@ CELL_27_PATCHED = code(
     "    ax_obs.grid(True, axis='x', color='gray', alpha=0.2, linestyle='--')\n"
     "\n"
     "    # Clip simulation to observation length (sim has one extra timestep)\n"
-    "    n = min(len(t_obs), v_best_de.shape[1])\n"
-    "    ax_sim.plot(t_obs[:n], v_best_de[i, :n], color=colors['sim'], lw=1.2)\n"
+    "    n = min(len(t_obs), v_best_de_sub.shape[1])\n"
+    "    ax_sim.plot(t_obs[:n], v_best_de_sub[i, :n], color=colors['sim'], lw=1.2)\n"
     "    ax_sim.set_ylabel('V (mV)', fontsize=10)\n"
     "    if i < 2:\n"
     "        ax_sim.spines[['top', 'right', 'bottom']].set_visible(False)\n"
@@ -319,10 +324,13 @@ CELL_GD_VERIFY = code(
     "print(df_gd_cmp.to_string(index=False))\n"
     "\n"
     "fig, axs = plt.subplots(3, 1, figsize=(14, 6), sharex=True, layout='constrained')\n"
-    "n_gd = min(len(t_obs), v_gd_best.shape[1])\n"
+    "# Subsample dt=0.025 ms -> dt_obs=0.25 ms (stride 10) BEFORE truncating by length —\n"
+    "# see the same fix applied to the DE best-fit trace above.\n"
+    "v_gd_best_sub = v_gd_best[:, ::10]\n"
+    "n_gd = min(len(t_obs), v_gd_best_sub.shape[1])\n"
     "for i, name in enumerate(['AB/PD', 'LP', 'PY']):\n"
     "    axs[i].plot(t_obs, v_obs[i], color='k', lw=0.8, alpha=0.6, label='Observed')\n"
-    "    axs[i].plot(t_obs[:n_gd], v_gd_best[i, :n_gd], color='C1', lw=0.9, alpha=0.9, label='GD best-fit')\n"
+    "    axs[i].plot(t_obs[:n_gd], v_gd_best_sub[i, :n_gd], color='C1', lw=0.9, alpha=0.9, label='GD best-fit')\n"
     "    axs[i].set_ylabel('V (mV)')\n"
     "    axs[i].set_title(name)\n"
     "axs[-1].set_xlabel('t (ms)')\n"
@@ -530,8 +538,12 @@ CELL_DEG_SIM = code(
     "v_verify_batch = np.array(sim_batch_fn(jnp.array(log10_g_verify)))\n"
     "print(f'  done in {_time.time() - t0:.2f} s')\n"
     "\n"
-    "n_v = min(v_obs.shape[1], v_verify_batch.shape[2])\n"
-    "v_verify_list = [v_verify_batch[k, :, :n_v] for k in range(N_VERIFY)]\n"
+    "# Subsample dt=0.025 ms -> dt_obs=0.25 ms (stride 10) BEFORE truncating by length —\n"
+    "# same fix as the DE/GD best-fit traces: slicing by raw index count instead would\n"
+    "# silently keep only the first ~400 ms of each 4 s simulation.\n"
+    "v_verify_sub = v_verify_batch[:, :, ::10]\n"
+    "n_v = min(v_obs.shape[1], v_verify_sub.shape[2])\n"
+    "v_verify_list = [v_verify_sub[k, :, :n_v] for k in range(N_VERIFY)]\n"
     "stats_verify  = summary_statistics_batch(v_verify_batch, dt=0.025)\n"
     "print('Done.')\n",
     id_="cell-deg-sim",
@@ -544,6 +556,10 @@ CELL_DEG_OVERLAY = code(
     "fig, axs = plt.subplots(3, 1, figsize=(14, 7), sharex=True, layout='constrained')\n"
     "neuron_names = ['AB/PD', 'LP', 'PY']\n"
     "\n"
+    "# v_verify_list above is already correctly subsampled to dt_obs; v_best_de itself\n"
+    "# is still at dt=0.025 ms, so subsample it the same way here before plotting.\n"
+    "v_best_de_sub = v_best_de[:, ::10]\n"
+    "\n"
     "for i, name in enumerate(neuron_names):\n"
     "    axs[i].plot(t_obs, v_obs[i], color='k', lw=1.4, zorder=5, label='Observed')\n"
     "\n"
@@ -554,8 +570,8 @@ CELL_DEG_OVERLAY = code(
     "            axs[i].plot(t_obs[:n], v_k[i, :n], color='C0', lw=0.5, alpha=0.25)\n"
     "\n"
     "    # DE best solution\n"
-    "    n_de = min(len(t_obs), v_best_de.shape[1])\n"
-    "    axs[i].plot(t_obs[:n_de], v_best_de[i, :n_de],\n"
+    "    n_de = min(len(t_obs), v_best_de_sub.shape[1])\n"
+    "    axs[i].plot(t_obs[:n_de], v_best_de_sub[i, :n_de],\n"
     "               color='C3', lw=1.2, alpha=0.9, zorder=4, label='DE best fit')\n"
     "\n"
     "    axs[i].set_ylabel('V (mV)')\n"
@@ -608,6 +624,42 @@ CELL_DEG_STATS = code(
     "    print(df_err.to_string(index=False))\n"
     "    print(f'\\nOverall mean: {rel_err.mean():.3f}')\n",
     id_="cell-deg-stats",
+)
+
+CELL_DEG_FEATURE_LOSS = code(
+    "# \"Equally optimal?\" check: compute the SAME weighted feature-loss DE was\n"
+    "# minimized against (not just a generic relative error) for each posterior\n"
+    "# sample, and compare directly against DE's single best-fit loss. This tests\n"
+    "# whether SNPE's posterior samples are comparably good solutions by the exact\n"
+    "# metric DE optimized, not just visually/statistically similar.\n"
+    "de_stats = summary_statistics(v_best_de, dt=0.025, burn_in_ms=500.0)\n"
+    "de_feature_loss = compute_weighted_feature_distance(de_stats, TARGET_STATS)\n"
+    "\n"
+    "posterior_feature_losses = np.array([\n"
+    "    compute_weighted_feature_distance(stats_verify[k], TARGET_STATS)\n"
+    "    for k in range(N_VERIFY)\n"
+    "])\n"
+    "\n"
+    "print(f'DE best-fit loss:                 {de_feature_loss:.4f}')\n"
+    "print(f'Posterior samples (n={N_VERIFY}) — same metric:')\n"
+    "print(f'  min:  {posterior_feature_losses.min():.4f}')\n"
+    "print(f'  mean: {posterior_feature_losses.mean():.4f}')\n"
+    "print(f'  max:  {posterior_feature_losses.max():.4f}')\n"
+    "n_comparable = int((posterior_feature_losses <= 10 * de_feature_loss).sum())\n"
+    "print(f'\\n{n_comparable}/{N_VERIFY} posterior samples are within 10x of the DE loss '\n"
+    "      f'({10 * de_feature_loss:.4f}) — i.e. comparably good solutions despite very '\n"
+    "      f'different conductances (degeneracy).')\n"
+    "\n"
+    "fig, ax = plt.subplots(figsize=(7, 4), layout='constrained')\n"
+    "ax.hist(posterior_feature_losses, bins=10, color='C0', alpha=0.7, label='Posterior samples (SNPE)')\n"
+    "ax.axvline(de_feature_loss, color='C3', lw=2, label=f'DE best fit ({de_feature_loss:.4f})')\n"
+    "ax.set_xlabel('Weighted feature loss (same metric as DE)')\n"
+    "ax.set_ylabel('Count')\n"
+    "ax.set_title('Posterior samples vs. DE: same-metric loss comparison')\n"
+    "ax.legend(fontsize=9)\n"
+    "fig.savefig('fig_posterior_vs_de_loss.pdf', bbox_inches='tight')\n"
+    "plt.show()\n",
+    id_="cell-deg-feature-loss",
 )
 
 CELL_DEG_WIDTH = code(
@@ -736,6 +788,7 @@ new_cells = [
     CELL_DEG_SIM,
     CELL_DEG_OVERLAY,
     CELL_DEG_STATS,
+    CELL_DEG_FEATURE_LOSS,
     CELL_DEG_WIDTH,
     CELL_CONCLUSIONS_MD,
 ]
