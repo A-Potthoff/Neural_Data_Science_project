@@ -253,8 +253,6 @@ def detect_bursts(spike_times: np.ndarray, ISI_threshold: float = 200.0, min_spi
     
     return bursts_filtered
 
-
-
 def burst_stats_single(
     v: np.ndarray,
     dt: float = 0.025,
