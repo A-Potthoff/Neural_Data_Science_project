@@ -8,10 +8,6 @@ from typing import Optional, Union, List, Tuple
 import jax.numpy as jnp
 from jaxley_models import PyloricNetwork # type: ignore
 
-# ---------------------------------------------------------------------------
-# Type aliases (avoid torch import which was crashing earlier kernels)
-# ---------------------------------------------------------------------------
-
 from numpy import ndarray
 import matplotlib.pyplot as plt
 from typing import Union, Optional, Tuple
